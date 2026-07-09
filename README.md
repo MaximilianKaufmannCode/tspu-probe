@@ -1,72 +1,88 @@
 # tspu-probe
 
-**A single-run diagnostic probe for characterising ТСПУ / DPI censorship behaviour on Russian ISP and mobile networks.**
+**A comprehensive, single-run diagnostic that fingerprints ТСПУ / DPI censorship behaviour on Russian ISP and mobile networks.**
 
-`tspu-probe` is a self-contained Bash + Python measurement tool that fingerprints how a network path filters traffic: SNI-based TLS blocking, RST injection, DNS interference, HTTP host-blocking, UDP/QUIC suppression, mobile large-transfer freezes, behavioural connection-freeze thresholds, and ClientHello desynchronisation (fragmentation) bypasses. It produces one structured, timestamped report intended as empirical input for censorship-circumvention research and protocol design.
+`tspu-probe` is a self-contained Bash + Python tool that characterises how a network path filters traffic and — new in 2.0 — tells you **which circumvention techniques actually work on that path**. It measures DNS interference (including race-injected fake answers), SNI/TLS blocking, RST injection with DPI localisation, a desynchronisation-bypass strategy matrix, HTTP host-blocking, ECH, UDP/QUIC suppression, throttling, mobile TCP-freezes and behavioural connection-freeze thresholds — and writes one structured, timestamped report (plus optional JSON).
 
-> **RU:** Одноразовый диагностический скрипт для снятия поведения ТСПУ/DPI на конкретном сетевом пути (фиксированный ШПД или мобильный оператор). За один прогон характеризует SNI-фильтрацию, инъекцию RST, вмешательство в DNS, HTTP-блокировки, подавление UDP/QUIC, мобильные «заморозки» крупных передач, порог поведенческого freeze и обход через фрагментацию ClientHello. Результат — единый структурированный отчёт.
+> **RU:** Одноразовый диагностический скрипт, снимающий поведение ТСПУ/DPI на конкретном сетевом пути и определяющий, **какие техники обхода на нём работают**. За один прогон: вмешательство в DNS (вкл. инъекцию поддельных ответов гонкой), SNI/TLS-блокировки, инъекцию RST с локализацией DPI, матрицу desync-обходов, HTTP-блокировки, ECH, подавление UDP/QUIC, троттлинг, мобильные TCP-заморозки и порог поведенческого freeze. Результат — единый отчёт (+ опционально JSON).
 
 ---
 
 ## ⚠️ Scope, ethics & legal
 
-- This is a **measurement / research** tool. It characterises the *censor's* behaviour on a network you are **authorised to test** (typically your own connection). It is **not** a circumvention client and ships **no** proxy/VPN.
+- A **measurement / research** tool. It characterises the *censor's* behaviour on a network you are **authorised to test** (typically your own connection). It is **not** a circumvention client and ships **no** proxy/VPN.
 - Run it **only on connections you own or are explicitly permitted to measure.**
-- Section 11 (behavioural freeze) is **deliberately adversarial**: it briefly triggers throttling on the local path to measure the freeze threshold and recovery. Expect short connectivity stalls during that section.
-- The tool is **read-only with respect to the host**: it changes no system state and removes its temporary files on exit.
+- The behavioural-freeze stage is **deliberately adversarial** and briefly stalls the local link — disable it with `--no-freeze` (or `--quick`).
+- **Read-only with respect to the host**: it changes no system state and removes its temporary files on exit.
 
 ## Requirements
 
-- Linux, `bash`, `python3` (3.8+)
-- `curl` (a build with **HTTP/3** and **`--ech`** unlocks the QUIC and Encrypted-ClientHello tests), `dig`, `openssl`
-- **root** recommended — enables the raw-socket RST-injection TTL analysis (Section 10); without root that one test is skipped and everything else still runs.
+- Linux, `bash`, `python3` (3.8+, standard library only)
+- `curl` (a build with **HTTP/3** and **`--ech`** unlocks the QUIC and Encrypted-ClientHello stages), `dig`, `openssl`
+- **root** recommended — enables the raw-socket RST-injection TTL analysis; everything else runs without it.
 
 ## Usage
 
-Disable **all** local VPN/proxy tunnels first — the host must egress directly over the network you want to characterise (the script aborts-with-warning if it detects a non-target egress country).
+Disable **all** local VPN/proxy tunnels first — the host must egress directly over the network you want to characterise (the script warns if it detects a non-target egress country).
 
 ```bash
-sudo bash tspu-probe.sh
+sudo bash tspu-probe.sh                 # full run
+sudo bash tspu-probe.sh --quick         # faster, skips slow/adversarial stages
+sudo bash tspu-probe.sh --no-freeze     # full run without the disruptive freeze stage
+sudo bash tspu-probe.sh --json --out ./reports
 ```
 
-Output is written to `./tspu-report-<timestamp>.txt` (and streamed to stdout). Typical run: **~3–5 MB** of traffic, **~10–13 min**.
+| Flag | Effect |
+|------|--------|
+| `--quick` | trims canary list, skips hop-scan and behavioural freeze |
+| `--no-freeze` | runs everything except the adversarial freeze stage |
+| `--json` | also writes a machine-readable `tspu-report-<ts>.json` |
+| `--out DIR` | output directory (default `.`) |
+| `--timeout N` | per-probe timeout in seconds (default 10) |
+| `--targets FILE` | custom canary list (one host per line) |
+
+Output → `<out>/tspu-report-<timestamp>.txt` (~3–6 MB traffic, ~10–15 min full run).
 
 ## What it measures
 
-| # | Section | Detects |
-|---|---------|---------|
-| 0 | Vantage | Egress IP / ASN / country / mobile flag; guards against a still-active tunnel |
-| 1 | Control | Baseline reachability & latency to allowed sites |
-| 2 | DNS | Poisoning / refusal — system vs foreign-UDP vs RU-UDP vs DoH |
-| 3 | IP reachability | TCP SYN to `:443`/`:80` of blocked hosts — isolates IP-blocks from SNI-blocks |
-| 4 | SNI filtering | Normal vs `split@1` vs `split@SNI` ClientHello — RST/DROP behaviour and desync bypass |
-| 5 | SNI-vs-IP | Benign / empty SNI to a blocked IP — is the block keyed on the name or the address? |
-| 6 | HTTP `:80` | Host-header blocking and RKN stub-page (blockpage) detection |
+| # | Stage | Detects |
+|---|-------|---------|
+| 0 | Vantage | egress IP / ASN / country / mobile flag, IPv6, MTU; guards against a still-active tunnel |
+| 1 | Control | baseline reachability & latency |
+| 2 | DNS | poisoning / refusal, **answer injection**, DoT, **DNS-over-TCP**, multiple resolvers |
+| 3 | IP reachability | TCP SYN to `:443`/`:80` — isolates IP-blocks from SNI-blocks |
+| 4 | SNI + **desync matrix** | `normal` / `split@1` / `split@4` / `split@SNI` / **TLS-record frag**, ×3 with majority vote |
+| 5 | SNI-vs-IP | benign / empty SNI to a blocked IP |
+| 6 | HTTP `:80` | Host-header blocking, RKN stub-page, **domain-fronting** probe |
 | 7 | ECH | Encrypted-ClientHello capability + DoH-bootstrapped live test |
-| 8 | UDP profile | DNS `:53`, NTP `:123`, STUN `:3478`, QUIC `:443` — all-UDP suppression vs QUIC-specific |
-| 9 | Large transfer | Range-capped downloads — detects the mobile ~16 KB TCP freeze on foreign paths |
-| 10 | RST fingerprint | TTL of injected RST vs genuine server packets (root); residual/stateful censorship window |
-| 11 | Behavioural freeze | Parallel-TLS burst sweep — freeze onset, duration and scope |
+| 8 | UDP profile | DNS `:53` / NTP `:123` / STUN `:3478` / QUIC `:443` |
+| 9 | Throughput | throttle quantification + mobile ~16 KB TCP-freeze |
+| 10 | DPI fingerprint | injected-RST TTL, **hop-distance localisation**, residual censorship window |
+| 11 | Behavioural freeze | parallel-TLS burst sweep — onset / duration / scope (opt-out) |
+| — | Verdict | which desync bypassed a block; which transports are viable; DPI hop → fake-TTL hint |
 
 ## How it works
 
-- **TLS probing** uses Python's `ssl.MemoryBIO` to build and emit a `ClientHello` directly, so the exact on-wire framing is controlled — enabling `split@1` and `split@SNI` TCP-segmentation (desync) tests without external tooling.
-- **Block classification** reads the first response bytes: a `0x16 0x03…` record (ServerHello) means *not blocked*; a reset means *RST injection*; silence means *DROP*.
-- **RST-injection detection** sniffs inbound packets via an `AF_PACKET` raw socket and compares the TTL of RST packets against genuine SYN/ACKs — a TTL delta reveals a middlebox-injected reset.
-- **DNS resolution** for blocked names is done over **DoH**, so canary IPs are obtained even when plain DNS is interfered with.
+- **TLS probing** builds and emits the `ClientHello` directly via `ssl.MemoryBIO`, so the exact on-wire framing is controlled — enabling `split@1` / `split@4` / `split@SNI` TCP-segmentation *and* TLS-record fragmentation without external tooling.
+- **DPI localisation** raises `IP_TTL` on the ClientHello until an injected RST appears; the crossover TTL estimates the censor's hop distance (useful for tuning fake-packet desync in zapret/byedpi).
+- **DNS injection** is caught by collecting *every* UDP response to a single query and comparing them.
+- **RST-injection detection** compares the TTL of RST packets against genuine SYN/ACKs via a raw socket (root).
+- **DoH** resolution (three providers) keeps canary IPs correct even when plain DNS is interfered with.
 
-## Output & interpretation
+## Output & verdict
 
-The report is plain text with one line per probe and a machine-readable summary. Key legends are printed inline per section (e.g. `OK` = ServerHello received, `RST` = injected reset, `TIMEOUT` = silent drop).
+Plain-text report (one line per probe) plus an optional JSON file and a closing **verdict** that summarises the working desync strategy, transport viability, and the estimated DPI hop distance — ready as input for circumvention configuration or protocol design.
 
 ## Limitations
 
 - Results are **specific to the vantage** (operator, region, time) — mobile and fixed-line paths differ; re-run per network.
-- Censorship is often intermittent and time-of-day dependent; a single run is a snapshot, not a verdict.
-- The behavioural-freeze threshold is inherently noisy; the script repeats the first freezing level, but pinning exact thresholds needs several runs.
+- Censorship is often intermittent; the desync matrix votes over 3 tries but a single run is still a snapshot.
+- Hop-distance and freeze thresholds can be noisy under residual/stateful censorship — the report flags likely contamination.
 
 ## License
 
-[MIT](LICENSE) — free to use, modify and redistribute, **with attribution** (the copyright and licence notice must be retained).
+**[Apache License 2.0](LICENSE)** — free to use, modify and redistribute (including commercially), **with mandatory attribution**: retain the copyright, license and `NOTICE` notices, and state significant changes. See [`NOTICE`](NOTICE).
 
-**Author:** Maximilian Kaufmann · © 2026
+> `v1.0.0` was released under MIT; from **v2.0.0** the project is licensed under Apache-2.0.
+
+**Author:** Maximilian Kaufmann · © 2026 · https://github.com/MaximilianKaufmannCode
