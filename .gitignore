@@ -1,0 +1,6 @@
+# probe output reports
+tspu-report*.txt
+# editor / OS cruft
+*.swp
+*~
+.DS_Store
