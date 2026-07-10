@@ -3,6 +3,14 @@
 All notable changes to **tspu-probe** are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.1.1] — 2026-07-10
+
+### Fixed
+- **DoT probe (§2)** — removed a broken nested `bash -c` quoting construct that
+  emitted a shell error (`unexpected EOF while looking for matching quote`) and
+  mangled the DNS-over-TLS line. The DoT check now runs cleanly (assigns to a
+  variable, then logs).
+
 ## [2.1.0] — 2026-07-10
 
 ### Fixed

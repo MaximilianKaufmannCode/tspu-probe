@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # =============================================================================
-#  tspu-probe 2.1 — comprehensive ТСПУ/DPI censorship-measurement probe (RU nets)
+#  tspu-probe 2.1.1 — comprehensive ТСПУ/DPI censorship-measurement probe (RU nets)
 #  Copyright (c) 2026 Maximilian Kaufmann. Licensed under the Apache License 2.0.
 #
 #  Single-run diagnostic of how a network path filters traffic: DNS interference
@@ -49,7 +49,7 @@ sec(){ log ""; log "==== $* ====================================================
 have(){ command -v "$1" >/dev/null 2>&1; }
 jput(){ printf '%s\t%s\n' "$1" "$2" >> "$JSONF"; }   # record for JSON summary
 
-log "tspu-probe 2.1  ts=$TS host=$(hostname 2>/dev/null) uid=$(id -u) quick=$QUICK"
+log "tspu-probe 2.1.1  ts=$TS host=$(hostname 2>/dev/null) uid=$(id -u) quick=$QUICK"
 log "local=$(date 2>/dev/null) utc=$(date -u 2>/dev/null) timeout=${TIMEOUT}s"
 [ "$(id -u)" = 0 ] && { log "ROOT: yes"; ROOT=1; } || { log "ROOT: no (raw tests skipped; rerun with sudo)"; ROOT=0; }
 for t in python3 curl dig openssl; do have "$t" && log "tool $t ok" || log "tool $t MISSING"; done
@@ -344,7 +344,8 @@ done
 log "-- DNS over TCP:53 (fallback path) --"
 for r in 8.8.8.8 1.1.1.1; do log "  dns-tcp @$r torproject: $(py dnstcp "$r" www.torproject.org)"; done
 log "-- DoT tcp:853 --"
-log "  dot 1.1.1.1: $(timeout 8 bash -c \"echo | openssl s_client -connect 1.1.1.1:853 -servername one.one.one.one -brief 2>&1 | grep -iE 'protocol|CONNECTED|error' | tr '\\n' ' '\" 2>/dev/null || echo FAIL)"
+DOT=$(echo | timeout 8 openssl s_client -connect 1.1.1.1:853 -servername one.one.one.one -brief 2>&1 | grep -iE 'protocol|connected|error' | tr '\n' ' ')
+log "  dot 1.1.1.1: ${DOT:-FAILED}"
 
 # ======================= 3. IP REACHABILITY =======================
 sec "3. IP reachability (TCP SYN :443/:80 — IP-block vs SNI-block)"
