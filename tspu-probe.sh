@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # =============================================================================
-#  tspu-probe 2.0 — comprehensive ТСПУ/DPI censorship-measurement probe (RU nets)
+#  tspu-probe 2.1 — comprehensive ТСПУ/DPI censorship-measurement probe (RU nets)
 #  Copyright (c) 2026 Maximilian Kaufmann. Licensed under the Apache License 2.0.
 #
 #  Single-run diagnostic of how a network path filters traffic: DNS interference
@@ -49,7 +49,7 @@ sec(){ log ""; log "==== $* ====================================================
 have(){ command -v "$1" >/dev/null 2>&1; }
 jput(){ printf '%s\t%s\n' "$1" "$2" >> "$JSONF"; }   # record for JSON summary
 
-log "tspu-probe 2.0  ts=$TS host=$(hostname 2>/dev/null) uid=$(id -u) quick=$QUICK"
+log "tspu-probe 2.1  ts=$TS host=$(hostname 2>/dev/null) uid=$(id -u) quick=$QUICK"
 log "local=$(date 2>/dev/null) utc=$(date -u 2>/dev/null) timeout=${TIMEOUT}s"
 [ "$(id -u)" = 0 ] && { log "ROOT: yes"; ROOT=1; } || { log "ROOT: no (raw tests skipped; rerun with sudo)"; ROOT=0; }
 for t in python3 curl dig openssl; do have "$t" && log "tool $t ok" || log "tool $t MISSING"; done
@@ -138,18 +138,20 @@ def hop(ip, sni, maxttl=24):
             s=socket.create_connection((ip,443),timeout=min(TMO,5))
             s.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, ttl)
             s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            s.sendall(ch); s.settimeout(min(TMO,4))
             try:
+                s.sendall(ch); s.settimeout(min(TMO,4))
                 d=s.recv(64); res="OK" if (d[:1]==b'\x16') else ("EOF" if not d else "DATA")
-            except ConnectionResetError: res="RST"
+            except (ConnectionResetError, BrokenPipeError): res="RST"
             except socket.timeout: res="TO"
-        except ConnectionResetError: res="RST0"
-        except Exception: res="ERR"
+            except OSError as e: res="ERR%d"%(e.errno or 0)
+        except (ConnectionResetError, BrokenPipeError): res="RSTc"
+        except socket.timeout: res="TOc"
+        except Exception as e: res="ERRc:"+type(e).__name__
         finally:
             try: s.close()
             except: pass
         trace.append([ttl,res])
-        if res=="RST" and dpi is None: dpi=ttl; break
+        if res in ("RST","RSTc") and dpi is None: dpi=ttl; break
         time.sleep(0.25)
     return {"dpi_hop":dpi, "trace":trace, "note":("possible-residual-contamination" if dpi and dpi<=2 else "")}
 
@@ -219,19 +221,26 @@ def ntp(host):
     except socket.timeout: return {"status":"TIMEOUT"}
     except Exception as e: return {"status":"ERR","detail":str(e)}
 
-def raw_rst(ip, sni, dur=8.0):
-    try:
-        s=socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003)); s.settimeout(1.0)
-    except Exception as e: return {"error":"raw socket: "+str(e)}
+def raw_rst(ip, sni, iface=None, dur=10.0):
     import threading
-    def fire():
-        try:
-            c=socket.create_connection((ip,443),timeout=5); c.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1)
-            c.sendall(build_ch(sni))
-            try: c.recv(2048)
+    try:
+        s=socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
+        if iface:
+            try: s.bind((iface,0))
             except Exception: pass
-            c.close()
-        except Exception: pass
+        s.settimeout(1.0)
+    except Exception as e: return {"error":"raw socket: "+str(e)}
+    def fire():
+        for _ in range(4):
+            try:
+                c=socket.create_connection((ip,443),timeout=5); c.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1)
+                c.sendall(build_ch(sni))
+                try: c.recv(2048)
+                except Exception: pass
+                c.close()
+            except Exception: pass
+            time.sleep(0.6)
+    time.sleep(0.2)
     threading.Thread(target=fire,daemon=True).start()
     out={"SYNACK":set(),"RST":set(),"other":set()}; t0=time.time(); n=0
     while time.time()-t0<dur:
@@ -247,7 +256,9 @@ def raw_rst(ip, sni, dur=8.0):
         if fl&0x04: out["RST"].add(ttl)
         elif fl&0x02: out["SYNACK"].add(ttl)
         else: out["other"].add(ttl)
-    r={k:sorted(v) for k,v in out.items()}; r["pkts"]=n; return r
+    r={k:sorted(v) for k,v in out.items()}; r["pkts"]=n
+    if n==0: r["note"]="0 pkts: target in drop-mode or wrong iface"
+    return r
 
 if __name__=="__main__":
     c=sys.argv[1]; a=sys.argv[2:]
@@ -258,26 +269,31 @@ if __name__=="__main__":
     elif c=="dnstcp":  print(json.dumps(dns_tcp(a[0],a[1])))
     elif c=="stun":    print(json.dumps(stun(a[0])))
     elif c=="ntp":     print(json.dumps(ntp(a[0])))
-    elif c=="rawrst":  print(json.dumps(raw_rst(a[0],a[1])))
+    elif c=="rawrst":  print(json.dumps(raw_rst(a[0],a[1],a[2] if len(a)>2 else None)))
 PYEOF
 export TPTMO="$TIMEOUT"
 py(){ python3 "$PY" "$@"; }
 pytls(){ python3 "$PY" tls "$1" "$2" "${3:-none}"; }
 st(){ python3 -c "import sys,json;print(json.load(sys.stdin).get('status','?'))" 2>/dev/null; }
 
-# DoH resolver with fallbacks + file cache (survives subshells)
+# DoH resolver via resolver IPs (no system DNS — robust to broken systemd-resolved after tunnel teardown)
 resolve(){
   local d="$1" ip
   ip=$(grep -m1 "^${d} " "$RESOLVED" 2>/dev/null | awk '{print $2}')
   [ -n "$ip" ] && { echo "$ip"; return; }
-  for u in "https://dns.google/resolve?name=${d}&type=A" \
-           "https://cloudflare-dns.com/dns-query?name=${d}&type=A" \
-           "https://dns.quad9.net:5053/dns-query?name=${d}&type=A"; do
+  for u in "https://1.1.1.1/dns-query?name=${d}&type=A" \
+           "https://8.8.8.8/resolve?name=${d}&type=A" \
+           "https://9.9.9.9/dns-query?name=${d}&type=A"; do
     ip=$(curl -s --max-time 8 -H 'accept: application/dns-json' "$u" 2>/dev/null | grep -oE '"data":"[0-9.]+"' | grep -oE '[0-9.]+' | head -1)
     [ -n "$ip" ] && break
   done
   [ -n "$ip" ] && echo "${d} ${ip}" >> "$RESOLVED"
   echo "$ip"
+}
+# curl that resolves host via DoH-by-IP and pins it (robust to broken system DNS)
+curlr(){
+  local host="$1" port="$2"; shift 2; local ip; ip=$(resolve "$host")
+  if [ -n "$ip" ]; then curl --resolve "${host}:${port}:${ip}" "$@"; else curl "$@"; fi
 }
 
 # canaries (override with --targets FILE : one host per line)
@@ -291,11 +307,11 @@ fi
 # ======================= 0. VANTAGE =======================
 sec "0. VANTAGE (tunnels must be OFF)"
 EIF=$(ip route get 1.1.1.1 2>/dev/null | grep -oE 'dev [^ ]+' | awk '{print $2}' | head -1)
-V=$(curl -s --max-time 12 "http://ip-api.com/json/?fields=status,country,regionName,city,isp,as,mobile,proxy,query" 2>/dev/null)
+V=$(curlr ip-api.com 80 -s --max-time 12 "http://ip-api.com/json/?fields=status,country,regionName,city,isp,as,mobile,proxy,query" 2>/dev/null)
 log "ip-api: $V"
 CC=$(printf '%s' "$V"|grep -oE '"country":"[^"]*"'|cut -d'"' -f4); ASN=$(printf '%s' "$V"|grep -oE '"as":"[^"]*"'|cut -d'"' -f4)
 MOB=$(printf '%s' "$V"|grep -oE '"mobile":[a-z]+'|cut -d: -f2)
-V6=$(curl -s6 --max-time 8 https://api64.ipify.org 2>/dev/null)
+V6=$(curlr api64.ipify.org 443 -s6 --max-time 8 "https://api64.ipify.org" 2>/dev/null)
 log "egress-if: ${EIF:-?}  mtu: $(ip link show "${EIF:-lo}" 2>/dev/null|grep -oE 'mtu [0-9]+')"
 log "ipv4=$(printf '%s' "$V"|grep -oE '"query":"[^"]*"'|cut -d'"' -f4)  ipv6=${V6:-none}  mobile=$MOB"
 jput vantage.country "$CC"; jput vantage.asn "$ASN"; jput vantage.mobile "$MOB"; jput vantage.iface "${EIF:-}"
@@ -308,7 +324,7 @@ else log ">>> OK vantage: $CC / $ASN"; jput vantage.valid "true"; fi
 # ======================= 1. CONTROL =======================
 sec "1. CONTROL connectivity + baseline latency"
 for d in ya.ru mail.ru gosuslugi.ru dzen.ru example.com cloudflare.com wikipedia.org; do
-  log "control $d : $(curl -s -o /dev/null --max-time 12 -w 'code=%{http_code} tcp=%{time_connect} tls=%{time_appconnect} ttfb=%{time_starttransfer}' "https://$d/" 2>/dev/null || echo FAIL)"
+  log "control $d : $(curlr "$d" 443 -s -o /dev/null --max-time 12 -w 'code=%{http_code} tcp=%{time_connect} tls=%{time_appconnect} ttfb=%{time_starttransfer}' "https://$d/" 2>/dev/null || echo FAIL)"
 done
 
 # ======================= 2. DNS =======================
@@ -368,8 +384,8 @@ log "(benign/empty=OK & blocked!=OK -> keyed on SNI, not IP)"
 # ======================= 6. HTTP:80 + FRONTING =======================
 sec "6. HTTP:80 Host-block + RKN stub + domain-fronting probe"
 for d in rutracker.org www.torproject.org x.com; do
-  h=$(curl -s -D - -o /dev/null --max-time 10 "http://$d/" 2>/dev/null | tr -d '\r' | grep -iE '^HTTP/|^location:' | tr '\n' ' | ')
-  body=$(curl -s --max-time 10 "http://$d/" 2>/dev/null | grep -aoiE 'заблокирован|ограничен доступ|единый реестр|blocklist|заглушк|warning' | head -1)
+  h=$(curlr "$d" 80 -s -D - -o /dev/null --max-time 10 "http://$d/" 2>/dev/null | tr -d '\r' | grep -iE '^HTTP/|^location:' | tr '\n' ' | ')
+  body=$(curlr "$d" 80 -s --max-time 10 "http://$d/" 2>/dev/null | grep -aoiE 'заблокирован|ограничен доступ|единый реестр|blocklist|заглушк|warning' | head -1)
   log "http80 $d : ${h:-no-response} :: stub=[${body:-none}]"
 done
 log "-- domain-fronting (TLS-SNI=allowed, HTTP-Host=blocked, same CDN) --"
@@ -384,7 +400,7 @@ for d in crypto.cloudflare.com cloudflare.com; do
 done
 if curl --help all 2>&1|grep -q '\-\-ech'; then
   for d in crypto.cloudflare.com cloudflare.com; do
-    r=$(curl -s --max-time 15 --ech true --doh-url https://cloudflare-dns.com/dns-query "https://$d/cdn-cgi/trace" 2>&1 | grep -iE 'sni=|http/' | tr '\n' ' ')
+    r=$(curl -s --max-time 15 --ech true --doh-url https://1.1.1.1/dns-query "https://$d/cdn-cgi/trace" 2>&1 | grep -iE 'sni=|http/' | tr '\n' ' ')
     log "  ech-live $d : ${r:-FAILED}"
   done
   log "  (sni=encrypted -> ECH passed through; else -> ECH not usable on this path)"
@@ -405,13 +421,14 @@ log "(DNS/NTP/STUN pass but QUIC:443 fails -> QUIC/port-443-UDP targeting, not a
 
 # ======================= 9. THROTTLE + 16KB FREEZE =======================
 sec "9. Throughput / throttle + mobile 16KB TCP-freeze (Range 256KB)"
-declare -A DL=( [RU_yandex]="https://mirror.yandex.ru/debian/ls-lR.gz" \
-                [RU_mailru]="https://limitpg.mail.ru/cgi-bin/readmsg" \
-                [FOR_ovh]="https://proof.ovh.net/files/1Mb.dat" \
-                [FOR_hetzner]="https://fsn1-speed.hetzner.com/100MB.bin" \
-                [FOR_cachefly]="https://cachefly.cachefly.net/10mb.test" )
+# host|port|url — reliable endpoints; curlr resolves host via DoH-by-IP
+declare -A DL=( [RU_yandex]="mirror.yandex.ru|443|https://mirror.yandex.ru/debian/ls-lR.gz" \
+                [RU_tele2]="speedtest.tele2.net|80|http://speedtest.tele2.net/1MB.zip" \
+                [FOR_cachefly]="cachefly.cachefly.net|443|https://cachefly.cachefly.net/10mb.test" \
+                [FOR_thinkbb]="ipv4.download.thinkbroadband.com|80|http://ipv4.download.thinkbroadband.com/5MB.zip" )
 for k in "${!DL[@]}"; do
-  r=$(curl -s -o /dev/null --max-time 25 -r 0-262143 -w 'got=%{size_download}B time=%{time_total}s spd=%{speed_download}B/s' "${DL[$k]}" 2>/dev/null)
+  IFS='|' read -r h p u <<< "${DL[$k]}"
+  r=$(curlr "$h" "$p" -s -o /dev/null --max-time 25 -r 0-262143 -w 'got=%{size_download}B time=%{time_total}s spd=%{speed_download}B/s' "$u" 2>/dev/null)
   log "dl $k : ${r:-FAILED}"
   jput "throughput.$k" "${r:-FAILED}"
 done
@@ -428,7 +445,7 @@ if [ "$ROOT" = 1 ]; then
   log "-- injected-RST TTL vs genuine (SYNACK) --"
   for d in www.torproject.org rutracker.org; do
     ip=$(resolve "$d"); [ -z "$ip" ] && continue
-    log "  rst-ttl $d ($ip): $(py rawrst "$ip" "$d")"
+    log "  rst-ttl $d ($ip): $(py rawrst "$ip" "$d" "${EIF:-}")"
   done
   log "  (RST TTL != SYNACK TTL -> middlebox injection; ignorable by TTL)"
 else log "  (RST-TTL needs root)"; fi
@@ -442,9 +459,9 @@ fi
 # ======================= 11. BEHAVIORAL FREEZE =======================
 if [ "$NOFREEZE" = 0 ]; then
 sec "11. Behavioral freeze — N-sweep + repeat (ADVERSARIAL, LAST)"
-CTRL="https://ya.ru/"; TSNI="www.youtube.com"; TIP=$(resolve "$TSNI")
-log "trigger=$TSNI ip=${TIP:-x} control=$CTRL"
-pc(){ curl -s -o /dev/null --max-time 4 -w '%{time_total}' "$CTRL" 2>/dev/null || echo FREEZE; }
+CTRL="https://ya.ru/"; TSNI="www.youtube.com"; TIP=$(resolve "$TSNI"); CTRL_IP=$(resolve ya.ru)
+log "trigger=$TSNI ip=${TIP:-x} control=$CTRL ctrl_ip=${CTRL_IP:-x}"
+pc(){ curl ${CTRL_IP:+--resolve ya.ru:443:$CTRL_IP} -s -o /dev/null --max-time 4 -w '%{time_total}' "$CTRL" 2>/dev/null || echo FREEZE; }
 log "baseline ctrl: $(pc) $(pc) $(pc)"
 run_round(){
   local N=$1 frozen=0 onset="" recov="" k c
