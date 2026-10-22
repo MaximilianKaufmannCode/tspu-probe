@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Test stub: pretend to be Linux so the platform preflight passes on macOS dev machines.
+echo Linux

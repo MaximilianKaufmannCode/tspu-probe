@@ -17,13 +17,15 @@
 
 ## Requirements
 
-- Linux, `bash`, `python3` (3.8+, standard library only)
-- `curl` (a build with **HTTP/3** and **`--ech`** unlocks the QUIC and Encrypted-ClientHello stages), `dig`, `openssl`
+- Linux, **`bash` ≥ 4** (macOS `/bin/bash` 3.2 is not supported), `python3` (3.8+, standard library only)
+- `curl` (a build with **HTTP/3** and **`--ech`** unlocks the QUIC and Encrypted-ClientHello stages), `dig`, `openssl`, `ip` (iproute2), `timeout` (coreutils)
 - **root** recommended — enables the raw-socket RST-injection TTL analysis; everything else runs without it.
+
+Missing prerequisites abort with exit code 2 before any traffic is sent (`--force` downgrades the platform/tool checks to warnings).
 
 ## Usage
 
-Disable **all** local VPN/proxy tunnels first — the host must egress directly over the network you want to characterise (the script warns if it detects a non-target egress country).
+Disable **all** local VPN/proxy tunnels first — the host must egress directly over the network you want to characterise. If the detected egress country is not Russia the run **aborts with exit 3** (override with `--force`; results are then not representative of ТСПУ).
 
 ```bash
 sudo bash tspu-probe.sh                 # full run
@@ -38,10 +40,29 @@ sudo bash tspu-probe.sh --json --out ./reports
 | `--no-freeze` | runs everything except the adversarial freeze stage |
 | `--json` | also writes a machine-readable `tspu-report-<ts>.json` |
 | `--out DIR` | output directory (default `.`) |
-| `--timeout N` | per-probe timeout in seconds (default 10) |
-| `--targets FILE` | custom canary list (one host per line) |
+| `--timeout N` | per-probe timeout, integer 1–600 s (default 10); scales curl/dig/DoT/STUN/NTP limits too |
+| `--targets FILE` | custom canary list (one host per line, `#` comments allowed; not trimmed by `--quick`) |
+| `--force` | continue despite a non-RU vantage, non-Linux OS or missing tools |
+| `--version` | print the version and exit |
+| `-h`, `--help` | short usage |
 
-Output → `<out>/tspu-report-<timestamp>.txt` (~3–6 MB traffic, ~10–15 min full run).
+Output → `<out>/tspu-report-<timestamp>.txt` (~3–6 MB traffic, ~10–15 min full run), mode 0600 (owned by `$SUDO_USER` under `sudo`).
+Exit codes: `0` ok · `2` usage / missing prerequisites · `3` vantage gate.
+
+## Privacy: what leaves your machine
+
+The probe contacts third parties; your public IP is visible to all of them. Do not run it if that is unacceptable.
+
+| Purpose | Hosts |
+|---------|-------|
+| Vantage (IP / ASN / country) | `ip-api.com` (plain HTTP), `api64.ipify.org` |
+| DoH bootstrap | `1.1.1.1`, `8.8.8.8` |
+| Control / HTTP / throughput | `ya.ru`, `mirror.yandex.ru`, `cachefly.cachefly.net`, `*.thinkbroadband.com`, `speedtest.tele2.net`, `www.google.com` |
+| UDP profile | `stun.l.google.com:19302`, `stun.cloudflare.com:3478`, `time.google.com:123`, `cloudflare-quic.com` |
+| ECH | `crypto.cloudflare.com` |
+| Canary domains | the list in the script (or your `--targets`) |
+
+The report itself contains your public IP, ASN and resolver addresses — review it before sharing.
 
 ## What it measures
 
@@ -53,13 +74,13 @@ Output → `<out>/tspu-report-<timestamp>.txt` (~3–6 MB traffic, ~10–15 min 
 | 3 | IP reachability | TCP SYN to `:443`/`:80` — isolates IP-blocks from SNI-blocks |
 | 4 | SNI + **desync matrix** | `normal` / `split@1` / `split@4` / `split@SNI` / **TLS-record frag**, ×3 with majority vote |
 | 5 | SNI-vs-IP | benign / empty SNI to a blocked IP |
-| 6 | HTTP `:80` | Host-header blocking, RKN stub-page, **domain-fronting** probe |
+| 6 | HTTP `:80` | Host-header blocking, RKN stub-page |
 | 7 | ECH | Encrypted-ClientHello capability + DoH-bootstrapped live test |
-| 8 | UDP profile | DNS `:53` / NTP `:123` / STUN `:3478` / QUIC `:443` |
+| 8 | UDP profile | DNS `:53` / NTP `:123` / STUN `:19302` (Google) + `:3478` (Cloudflare) / QUIC `:443` |
 | 9 | Throughput | throttle quantification + mobile ~16 KB TCP-freeze |
 | 10 | DPI fingerprint | injected-RST TTL, **hop-distance localisation**, residual censorship window |
 | 11 | Behavioural freeze | parallel-TLS burst sweep — onset / duration / scope (opt-out) |
-| — | Verdict | which desync bypassed a block; which transports are viable; DPI hop → fake-TTL hint |
+| — | Verdict | which desync modes bypassed a block that the normal ClientHello hit; DPI hop → fake-TTL hint |
 
 ## How it works
 
@@ -67,11 +88,23 @@ Output → `<out>/tspu-report-<timestamp>.txt` (~3–6 MB traffic, ~10–15 min 
 - **DPI localisation** raises `IP_TTL` on the ClientHello until an injected RST appears; the crossover TTL estimates the censor's hop distance (useful for tuning fake-packet desync in zapret/byedpi).
 - **DNS injection** is caught by collecting *every* UDP response to a single query and comparing them.
 - **RST-injection detection** compares the TTL of RST packets against genuine SYN/ACKs via a raw socket (root).
-- **DoH** resolution (three providers) keeps canary IPs correct even when plain DNS is interfered with.
+- **DoH** resolution (Cloudflare and Google, by IP) keeps canary IPs correct even when plain DNS is interfered with; every lookup is logged as a `[doh]` line.
 
 ## Output & verdict
 
-Plain-text report (one line per probe) plus an optional JSON file and a closing **verdict** that summarises the working desync strategy, transport viability, and the estimated DPI hop distance — ready as input for circumvention configuration or protocol design.
+Plain-text report (one line per probe) plus an optional JSON file (`version`, `vantage_valid`, `verdict`, and the collected probe data) and a closing **verdict**.
+
+The verdict is computed from the report's own SNI matrix: a desync mode is reported as a bypass only for domains whose *normal* ClientHello was blocked (`RST`/`TIMEOUT`/`EOF`/`DATA`); modes that fail on unblocked domains are flagged; `MIXED`/`ERR` results are inconclusive; with no blocking observed the verdict is `n/a`. It also gives the estimated DPI hop distance as a fake-TTL hint. UDP/QUIC and throughput findings are in §8/§9 — the verdict does not summarise them.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v     # stdlib only
+TSPU_BASH=/opt/homebrew/bin/bash python3 -m unittest discover -s tests   # run CLI smoke tests with bash >= 4
+TSPU_OFFLINE=1 python3 -m unittest discover -s tests                      # skip tests that touch the network
+```
+
+The tests exercise the embedded engine against a loopback TLS server with a DPI simulator, plus CLI validation and a stubbed end-to-end `--quick` run (`tests/stubs/`). They cannot reproduce real ТСПУ behaviour.
 
 ## Limitations
 

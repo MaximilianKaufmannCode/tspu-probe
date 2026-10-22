@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Test stub: no DNS answers.
+if [ "${1:-}" = "-v" ]; then echo "DiG 9.stub"; fi
+exit 0

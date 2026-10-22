@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Test stub for iproute2.
+case "$*" in
+  "route get 1.1.1.1") echo "1.1.1.1 via 192.0.2.254 dev eth0 src 192.0.2.1";;
+  "route show default") echo "default via 192.0.2.254 dev eth0";;
+  "-6 route get"*) exit 2;;
+  *) exit 1;;
+esac

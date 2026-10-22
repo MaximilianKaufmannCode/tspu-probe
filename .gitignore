@@ -1,6 +1,9 @@
 # probe output reports
 tspu-report*.txt
 tspu-report*.json
+# python cache
+__pycache__/
+*.pyc
 # editor / OS cruft
 *.swp
 *~

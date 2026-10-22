@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Test stub: answers the few URLs the --quick run needs, never touches the network.
+last=""
+for a in "$@"; do last="$a"; done
+case " $* " in
+  *" --version "*) echo "curl 8.0.0 (stub)"; exit 0;;
+  *" --help "*) exit 0;;
+esac
+case "$last" in
+  *ip-api.com*) echo '{"status":"success","country":"'"${STUB_COUNTRY:-Russia}"'","as":"AS0 Test","mobile":false,"query":"192.0.2.1"}';;
+  */dns-query?name=*|*/resolve?name=*) echo '{"Answer":[{"type":1,"data":"127.0.0.1"}]}';;
+  *) exit 7;;
+esac

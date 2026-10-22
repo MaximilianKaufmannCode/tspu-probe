@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Test stub: only `openssl version` works.
+if [ "${1:-}" = "version" ]; then echo "OpenSSL 3.0.0 (stub)"; exit 0; fi
+exit 1

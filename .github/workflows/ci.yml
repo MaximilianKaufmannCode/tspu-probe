@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Syntax
+        run: bash -n tspu-probe.sh
+      - name: shellcheck
+        run: shellcheck -S style tspu-probe.sh
+      - name: ruff (embedded engine)
+        run: |
+          pip install ruff
+          python3 -c "import sys; sys.path.insert(0, 'tests'); import engine_loader; open('engine.py', 'w').write(engine_loader.engine_source())"
+          ruff check --select F,E722,E9 engine.py
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.8", "3.12"]
+        exclude:
+          - os: macos-latest
+            python: "3.8"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: bash >= 4 on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install bash
+          echo "TSPU_BASH=$(brew --prefix)/bin/bash" >> "$GITHUB_ENV"
+      - name: Unit and CLI tests
+        run: python3 -W error::ResourceWarning -m unittest discover -s tests -v
