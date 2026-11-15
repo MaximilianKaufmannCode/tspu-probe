@@ -182,6 +182,29 @@ class VerdictTests(unittest.TestCase):
         d, text = self.run_verdict([])
         self.assertIn("not measured", text)
 
+    def test_dns_transport_lines(self):
+        d, text = self.run_verdict([
+            '  dns-transport @8.8.8.8: {"udp": ["193.232.230.48"], "tcp": ["172.253.1.2"], "tcp_status": "OK", "verdict": "udp-diverted"}',
+            '  dns-transport @1.1.1.1: {"udp": [], "tcp": [], "tcp_status": "TIMEOUT", "verdict": "inconclusive"}',
+        ])
+        self.assertEqual(d["dns_transport"], {"8.8.8.8": "udp-diverted", "1.1.1.1": "inconclusive"})
+        self.assertIn("dns @8.8.8.8: UDP/53 answered from 193.232.*", text)
+        self.assertIn("dns @1.1.1.1: UDP/53 vs TCP/53 inconclusive", text)
+        self.assertEqual(self.run_verdict([])[0]["dns_transport"], {})
+
+
+class TransportVerdictTests(unittest.TestCase):
+    def test_udp_to_nsdi_tcp_clean(self):
+        self.assertEqual(E.transport_verdict(["193.232.230.48"], ["172.253.1.2"]), "udp-diverted")
+
+    def test_both_nsdi_is_not_udp_only(self):
+        self.assertEqual(E.transport_verdict(["193.232.230.48"], ["193.232.230.48"]), "same")
+
+    def test_differs_and_missing(self):
+        self.assertEqual(E.transport_verdict(["172.253.1.2"], ["74.125.1.1"]), "differs")
+        self.assertEqual(E.transport_verdict([], ["74.125.1.1"]), "inconclusive")
+        self.assertEqual(E.transport_verdict(["193.232.230.48"], []), "inconclusive")
+
 
 class FragTests(unittest.TestCase):
     def test_frag_records_reassemble(self):

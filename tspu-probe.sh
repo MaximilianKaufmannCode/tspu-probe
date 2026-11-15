@@ -290,6 +290,20 @@ def dns_tcp(resolver, domain, port=53):
         try: s.close()
         except Exception: pass
 
+NSDI="193.232."  # answers seen from MSK-IX/NSDI when TSPU DNATs UDP/53 (net4people/bbs#657)
+
+def transport_verdict(udp_ips, tcp_ips):
+    # same query, same resolver: TSPU diverts UDP/53 to the NSDI and leaves TCP/53 alone
+    nsdi=lambda ips:any(ip.startswith(NSDI) for ip in ips)
+    if not udp_ips or not tcp_ips: return "inconclusive"
+    if nsdi(udp_ips) and not nsdi(tcp_ips): return "udp-diverted"
+    return "same" if sorted(udp_ips)==sorted(tcp_ips) else "differs"
+
+def dns_transport(resolver, domain="whoami.akamai.net", port=53):
+    u=dnsmulti(resolver, domain, port=port); t=dns_tcp(resolver, domain, port=port)
+    uips=sorted({ip for r in u.get("responses",[]) for ip in r["ips"]}); tips=t.get("ips",[])
+    return {"udp":uips,"tcp":tips,"tcp_status":t.get("status"),"verdict":transport_verdict(uips,tips)}
+
 def stun(host, port=3478):
     try:
         m=b'\x00\x01\x00\x00\x21\x12\xa4\x42'+os.urandom(12)
@@ -348,6 +362,7 @@ def raw_rst(ip, sni, iface=None, dur=10.0):
 
 _SNI_RE=re.compile(r"^sni (\S+) \(([^)]*)\): normal=(\S+) split1=(\S+) split4=(\S+) splitSNI=(\S+) TLSrec=(\S+)\s*$")
 _HOP_RE=re.compile(r"^\s*hop \S+ \([^)]*\): (\{.*\})\s*$")
+_XPORT_RE=re.compile(r"^\s*dns-transport @(\S+): (\{.*\})\s*$")
 _VOTE_RE=re.compile(r"^([A-Z_]+)\((\d+)/(\d+)\)$")
 _BLOCK={"RST","TIMEOUT","EOF","DATA"}
 _MODES=("split1","split4","splitSNI","TLSrec")
@@ -360,7 +375,7 @@ def _status(v):
 def verdict_data(path):
     """Derive the desync verdict from the report's own `sni ...` lines.
     A mode only counts as a bypass on domains whose normal ClientHello was blocked."""
-    blocked=[]; clean=[]; unclear=[]; no_ip=0; dpi=None; hop_seen=False
+    blocked=[]; clean=[]; unclear=[]; no_ip=0; dpi=None; hop_seen=False; xport={}
     bypass={m:[] for m in _MODES}; failed={m:[] for m in _MODES}; broke={m:[] for m in _MODES}
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
@@ -384,9 +399,14 @@ def verdict_data(path):
             if h:
                 try: hop_seen=True; dpi=json.loads(h.group(1)).get("dpi_hop")
                 except ValueError: pass
+                continue
+            x=_XPORT_RE.match(line)
+            if x:
+                try: xport[x.group(1)]=json.loads(x.group(2)).get("verdict","inconclusive")
+                except ValueError: pass
     return {"blocked":blocked,"unblocked":clean,"inconclusive":unclear,"no_ip":no_ip,
             "bypass":bypass,"failed":failed,"breaks_unblocked":broke,
-            "dpi_hop":dpi,"hop_measured":hop_seen}
+            "dpi_hop":dpi,"hop_measured":hop_seen,"dns_transport":xport}
 
 def verdict_text(d):
     out=[]; nb=len(d["blocked"]); tested=nb+len(d["unblocked"])+len(d["inconclusive"])
@@ -408,6 +428,9 @@ def verdict_text(d):
         out.append("dpi_hop=%s: fake/TTL-limited packets (zapret/byedpi) need TTL >= %s and below the server distance"%(d["dpi_hop"],d["dpi_hop"]))
     elif d["hop_measured"]: out.append("dpi_hop: not located")
     else: out.append("dpi_hop: not measured")
+    for r,v in d.get("dns_transport",{}).items():
+        if v=="udp-diverted": out.append("dns @%s: UDP/53 answered from %s* (MSK-IX/NSDI), TCP/53 not — UDP/53 is diverted on this path"%(r,NSDI))
+        else: out.append("dns @%s: UDP/53 vs TCP/53 %s"%(r,v))
     return "\n".join(out)
 
 if __name__=="__main__":
@@ -418,6 +441,7 @@ if __name__=="__main__":
     elif c=="hop":     print(json.dumps(hop(a[0],a[1],port=int(a[2]) if len(a)>2 else 443)))
     elif c=="dnsmulti":print(json.dumps(dnsmulti(a[0],a[1],port=int(a[2]) if len(a)>2 else 53)))
     elif c=="dnstcp":  print(json.dumps(dns_tcp(a[0],a[1],port=int(a[2]) if len(a)>2 else 53)))
+    elif c=="dnsxport":print(json.dumps(dns_transport(a[0],a[1] if len(a)>1 else "whoami.akamai.net")))
     elif c=="stun":    print(json.dumps(stun(a[0],int(a[1]) if len(a)>1 else 3478)))
     elif c=="ntp":     print(json.dumps(ntp(a[0])))
     elif c=="rawrst":  print(json.dumps(raw_rst(a[0],a[1],a[2] if len(a)>2 else None)))
@@ -509,6 +533,8 @@ for d in www.torproject.org rutracker.org; do
 done
 log "-- DNS over TCP:53 (fallback path) --"
 for r in 8.8.8.8 1.1.1.1; do log "  dns-tcp @$r torproject: $(py dnstcp "$r" www.torproject.org)"; done
+log "-- same query over UDP/53 and TCP/53 (whoami.akamai.net answers with the resolver's egress IP) --"
+for r in 8.8.8.8 1.1.1.1; do log "  dns-transport @$r: $(py dnsxport "$r")"; done
 log "-- DoT tcp:853 --"
 DOT=$(echo | timeout "$(tm 8)" openssl s_client -connect 1.1.1.1:853 -servername one.one.one.one -brief 2>&1 | grep -iE 'protocol|connected|error' | tr '\n' ';')
 log "  dot 1.1.1.1: ${DOT:-FAILED}"

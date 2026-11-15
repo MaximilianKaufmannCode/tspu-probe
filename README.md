@@ -94,7 +94,7 @@ The report itself contains your public IP, ASN and resolver addresses — review
 
 Plain-text report (one line per probe) plus an optional JSON file (`version`, `vantage_valid`, `verdict`, and the collected probe data) and a closing **verdict**.
 
-The verdict is computed from the report's own SNI matrix: a desync mode is reported as a bypass only for domains whose *normal* ClientHello was blocked (`RST`/`TIMEOUT`/`EOF`/`DATA`); modes that fail on unblocked domains are flagged; `MIXED`/`ERR` results are inconclusive; with no blocking observed the verdict is `n/a`. It also gives the estimated DPI hop distance as a fake-TTL hint. UDP/QUIC and throughput findings are in §8/§9 — the verdict does not summarise them.
+The verdict is computed from the report's own SNI matrix: a desync mode is reported as a bypass only for domains whose *normal* ClientHello was blocked (`RST`/`TIMEOUT`/`EOF`/`DATA`); modes that fail on unblocked domains are flagged; `MIXED`/`ERR` results are inconclusive; with no blocking observed the verdict is `n/a`. It also gives the estimated DPI hop distance as a fake-TTL hint. For 8.8.8.8 and 1.1.1.1 it adds one DNS line from §2, which sends the same `whoami.akamai.net` query over UDP/53 and TCP/53: `udp-diverted` when only the UDP answer comes from `193.232.*` (MSK-IX/NSDI), otherwise `same`, `differs` or `inconclusive`. UDP/QUIC and throughput findings are in §8/§9 — the verdict does not summarise them.
 
 ## Tests
 

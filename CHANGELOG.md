@@ -3,6 +3,14 @@
 All notable changes to **tspu-probe** are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **DNS transport comparison (§2)** — the same `whoami.akamai.net` query goes to 8.8.8.8 and
+  1.1.1.1 over UDP/53 and TCP/53 (`dnsxport`). The verdict gains a `dns_transport` entry per
+  resolver: `udp-diverted` when only the UDP answer comes from `193.232.*` (MSK-IX/NSDI, the
+  TSPU DNAT described in net4people/bbs#657), else `same`, `differs` or `inconclusive`.
+
 ## [2.1.2] — 2026-10-22
 
 Hotfix release: the verdict could report a bypass that never happened, and several
